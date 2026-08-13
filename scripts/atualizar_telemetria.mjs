@@ -19,7 +19,7 @@ import { simpleParser } from 'mailparser';
 import fs from 'fs';
 import path from 'path';
 import XLSX from 'xlsx';
-import { parseTelemetriaWorkbook } from './parse_telemetria.mjs';
+import { parseTelemetriaWorkbook, buildMeta } from './parse_telemetria.mjs';
 
 const GMAIL_ADDRESS = process.env.GMAIL_ADDRESS;
 const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
@@ -98,21 +98,43 @@ async function main() {
   console.log(`Usando e-mail "${picked.subject}" de ${picked.from} (${picked.date}). Anexo: ${picked.attachment.filename} (${picked.attachment.size} bytes).`);
 
   const wb = XLSX.read(picked.attachment.content, { type: 'buffer' });
-  const { meta, trips, alertEvents } = parseTelemetriaWorkbook(wb);
-  const novoConteudo = { meta, trips, alertEvents };
+  const { trips: tripsNovas, alertEvents: alertasNovos } = parseTelemetriaWorkbook(wb);
 
+  // O relatório "Diário" da MOVIAS traz só uma janela móvel de ~48h (desde 0h de
+  // ontem até 23h59 de hoje) — não o histórico completo do projeto. Por isso o
+  // robô nunca substitui dados_atuais.json de uma vez: ele funde o que veio de
+  // novo com o que já estava acumulado, usando Frota+horário do evento como chave
+  // (o mesmo evento relatado de novo, por causa da sobreposição entre um dia e o
+  // próximo, simplesmente cai na mesma chave e não duplica).
   const anterior = fs.existsSync(OUTPUT_PATH) ? JSON.parse(fs.readFileSync(OUTPUT_PATH, 'utf8')) : null;
+  const tripsAnteriores = anterior?.trips || [];
+  const alertasAnteriores = anterior?.alertEvents || [];
+
+  const tripKey = t => `${t.Frota}|${t.DataDescarga}`;
+  const alertKey = a => `${a.Frota}|${a.DataEvento}|${a.Evento}`;
+
+  const tripsMap = new Map(tripsAnteriores.map(t => [tripKey(t), t]));
+  tripsNovas.forEach(t => tripsMap.set(tripKey(t), t));
+  const tripsFundidas = [...tripsMap.values()].sort((a, b) => new Date(a.DataDescarga) - new Date(b.DataDescarga));
+
+  const alertasMap = new Map(alertasAnteriores.map(a => [alertKey(a), a]));
+  alertasNovos.forEach(a => alertasMap.set(alertKey(a), a));
+  const alertasFundidos = [...alertasMap.values()].sort((a, b) => new Date(a.DataEvento) - new Date(b.DataEvento));
+
+  const meta = buildMeta(tripsFundidas);
+  const novoConteudo = { meta, trips: tripsFundidas, alertEvents: alertasFundidos };
   const anteriorComparavel = anterior ? { meta: anterior.meta, trips: anterior.trips, alertEvents: anterior.alertEvents } : null;
   const mudou = JSON.stringify(anteriorComparavel) !== JSON.stringify(novoConteudo);
 
   if (!mudou) {
-    console.log('Dados extraídos são idênticos aos já publicados — nada a commitar.');
+    console.log('Nenhuma viagem nova em relação ao que já está publicado — nada a commitar.');
     return;
   }
 
   const payload = { ...novoConteudo, exportadoEm: new Date().toISOString() };
   fs.writeFileSync(OUTPUT_PATH, JSON.stringify(payload));
-  console.log(`dados_atuais.json atualizado: ${trips.length} viagens, ${meta.cacambas_monitoradas_piloto} caçambas (${meta.periodo_min}–${meta.periodo_max}).`);
+  const novas = tripsFundidas.length - tripsAnteriores.length;
+  console.log(`dados_atuais.json atualizado: ${tripsFundidas.length} viagens no total (${novas >= 0 ? '+' + novas : novas} desde a última execução), ${meta.cacambas_monitoradas_piloto} caçambas (${meta.periodo_min}–${meta.periodo_max}).`);
 }
 
 main().catch(err => {
