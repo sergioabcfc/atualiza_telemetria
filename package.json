@@ -1,0 +1,14 @@
+{
+  "name": "atualiza-telemetria",
+  "private": true,
+  "type": "module",
+  "description": "Robô que atualiza o painel de telemetria a partir do relatório agendado da MOVIAS recebido por e-mail.",
+  "scripts": {
+    "atualizar": "node scripts/atualizar_telemetria.mjs"
+  },
+  "dependencies": {
+    "imapflow": "^1.0.171",
+    "mailparser": "^3.7.1",
+    "xlsx": "^0.18.5"
+  }
+}
