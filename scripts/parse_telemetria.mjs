@@ -80,6 +80,31 @@ export function findHeaderRow(ws) {
   return null;
 }
 
+// Recalcula o bloco `meta` a partir de uma lista de viagens (usado tanto logo após
+// o parsing de um único relatório quanto — no robô de automação — depois de fundir
+// o relatório novo com o histórico acumulado, já que o relatório "Diário" da MOVIAS
+// só traz uma janela móvel de ~48h, não o histórico completo).
+export function buildMeta(trips) {
+  const frotaTipo = {};
+  trips.forEach(t => { if (t.TipoVeiculo) frotaTipo[t.Frota] = t.TipoVeiculo; });
+  const tiposEquipamento = [...new Set(Object.values(frotaTipo))].sort();
+  const equipPorTipo = {};
+  Object.entries(frotaTipo).forEach(([f, t]) => { (equipPorTipo[t] = equipPorTipo[t] || []).push(f); });
+  Object.keys(equipPorTipo).forEach(k => { equipPorTipo[k] = [...new Set(equipPorTipo[k])].sort(); });
+  const todasFrotas = Object.keys(frotaTipo).sort();
+
+  const diasPeriodo = [...new Set(trips.map(t => t.Data))].sort();
+  const cacambasMonitoradas = new Set(trips.map(t => t.Frota)).size;
+  const viagensDiaMedia = cacambasMonitoradas && diasPeriodo.length ? Math.round((trips.length / (cacambasMonitoradas * diasPeriodo.length)) * 10) / 10 : 0;
+
+  return {
+    periodo_min: diasPeriodo[0], periodo_max: diasPeriodo[diasPeriodo.length - 1], dias_periodo: diasPeriodo.length,
+    frota_total_cacambas: FLEET_TOTAL_CACAMBAS, pct_manual_identificado: PCT_MANUAL_IDENTIFICADO,
+    cacambas_monitoradas_piloto: cacambasMonitoradas, viagens_dia_media_por_cacamba: viagensDiaMedia,
+    tipos_equipamento: tiposEquipamento, equip_por_tipo: equipPorTipo, todas_frotas: todasFrotas, frota_tipo: frotaTipo,
+  };
+}
+
 export function parseTelemetriaWorkbook(wb) {
   let ws = wb.Sheets['Relatório de Eventos'];
   let found = ws ? findHeaderRow(ws) : null;
@@ -194,23 +219,6 @@ export function parseTelemetriaWorkbook(wb) {
     throw new Error('Nenhuma viagem foi identificada (não há eventos "Sensor Descarregando" no arquivo). Confirme se o período exportado inclui caçambas com sensor de báscula ativo.');
   }
 
-  const tiposEquipamento = [...new Set(rows.map(r => r.TipoVeiculo).filter(Boolean))].sort();
-  const frotaTipo = {};
-  rows.forEach(r => { if (r.TipoVeiculo) frotaTipo[r.Frota] = r.TipoVeiculo; });
-  const equipPorTipo = {};
-  Object.entries(frotaTipo).forEach(([f, t]) => { (equipPorTipo[t] = equipPorTipo[t] || []).push(f); });
-  Object.keys(equipPorTipo).forEach(k => { equipPorTipo[k] = [...new Set(equipPorTipo[k])].sort(); });
-  const todasFrotas = Object.keys(frotaTipo).sort();
-
-  const diasPeriodo = [...new Set(trips.map(t => t.Data))].sort();
-  const cacambasMonitoradas = new Set(trips.map(t => t.Frota)).size;
-  const viagensDiaMedia = cacambasMonitoradas && diasPeriodo.length ? Math.round((trips.length / (cacambasMonitoradas * diasPeriodo.length)) * 10) / 10 : 0;
-
-  const meta = {
-    periodo_min: diasPeriodo[0], periodo_max: diasPeriodo[diasPeriodo.length - 1], dias_periodo: diasPeriodo.length,
-    frota_total_cacambas: FLEET_TOTAL_CACAMBAS, pct_manual_identificado: PCT_MANUAL_IDENTIFICADO,
-    cacambas_monitoradas_piloto: cacambasMonitoradas, viagens_dia_media_por_cacamba: viagensDiaMedia,
-    tipos_equipamento: tiposEquipamento, equip_por_tipo: equipPorTipo, todas_frotas: todasFrotas, frota_tipo: frotaTipo,
-  };
+  const meta = buildMeta(trips);
   return { meta, trips, alertEvents };
 }
