@@ -2,8 +2,16 @@ name: Atualiza dados de telemetria
 
 on:
   schedule:
-    - cron: '0 10 * * *'
-    - cron: '0 18 * * *'
+    # Roda duas vezes por dia (~07h20 e ~15h12 em horário de Brasília) pra
+    # pegar o relatório diário do MOVIAS. O horário da manhã (07h20) fica
+    # ~20min depois da geração do relatório no MOVIAS (07h), dando tempo do
+    # e-mail chegar antes do robô checar. É seguro rodar "à toa": o script só
+    # commita quando os dados extraídos são diferentes dos já publicados.
+    # Os horários ficam fora da hora cheia (não 10:00/18:00 UTC) porque
+    # agendamentos exatamente na hora cheia sofrem mais atraso/fila no
+    # GitHub Actions.
+    - cron: '20 10 * * *'
+    - cron: '12 18 * * *'
   workflow_dispatch: {}
 
 permissions:
