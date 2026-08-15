@@ -3751,7 +3751,28 @@ function rebuildDataset(parsed){
         if(getResp.status===200){
           const info = await getResp.json();
           shaAtual = info.sha;
-          try{ anterior = JSON.parse(base64ToUtf8Tel(info.content)); }catch(e){ anterior = null; }
+          if (info.content) {
+            // Arquivo pequeno (<1MB): a API de Conteúdo do GitHub manda o
+            // conteúdo já embutido (base64) na própria resposta.
+            try{ anterior = JSON.parse(base64ToUtf8Tel(info.content)); }catch(e){ anterior = null; }
+          } else if (info.download_url) {
+            // Arquivo grande (>1MB, como o nosso com o histórico completo): a
+            // API de Conteúdo do GitHub NÃO manda o content embutido nesse
+            // caso — precisa buscar separado pelo link bruto (download_url).
+            // (Bug corrigido: antes disso, um dados_atuais.json grande fazia
+            // "anterior" virar null silenciosamente e a publicação seguinte
+            // sobrescrevia o histórico em vez de somar a ele.)
+            const rawResp = await fetch(info.download_url, {cache:'no-store'});
+            if(rawResp.ok){
+              try{ anterior = await rawResp.json(); }catch(e){ anterior = null; }
+            }
+          }
+          if(!anterior){
+            // Existe um dados_atuais.json no GitHub mas não conseguimos ler o
+            // conteúdo dele de nenhuma forma — é mais seguro parar aqui do que
+            // publicar por cima e arriscar apagar histórico sem querer.
+            throw new Error('Existe um dados_atuais.json no GitHub mas não consegui ler o conteúdo dele (arquivo grande demais ou formato inesperado). Publicação cancelada por segurança — nada foi sobrescrito. Avise o Claude antes de tentar de novo.');
+          }
         } else if(getResp.status!==404){
           const errBody = await getResp.json().catch(()=>({}));
           throw new Error(`Não consegui ler o arquivo atual do GitHub (HTTP ${getResp.status}): ${errBody.message || 'token sem permissão ou expirado?'}`);
