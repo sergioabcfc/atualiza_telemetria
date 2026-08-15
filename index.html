@@ -2027,9 +2027,14 @@ function rebuildDataset(parsed){
   // Busca dados_atuais.json (gerado pelo robô de automação a partir do relatório
   // agendado da MOVIAS) — se não existir ou falhar (ex: primeira publicação, uso
   // local via file://), cai pro JSON embutido no próprio arquivo como reserva.
+  // URL absoluta (não relativa) de propósito: este mesmo index.html é publicado
+  // em mais de um site (atualiza_telemetria e TripoloniSP284), e todos devem ler
+  // sempre a MESMA fonte única de dados em vez de cada um ter sua própria cópia
+  // (é isso que causava versões diferentes em links diferentes).
+  const URL_DADOS_ATUAIS_TEL = 'https://sergioabcfc.github.io/atualiza_telemetria/dados_atuais.json';
   let dadosIniciais;
   try{
-    const resp = await fetch('dados_atuais.json', {cache:'no-store'});
+    const resp = await fetch(URL_DADOS_ATUAIS_TEL, {cache:'no-store'});
     if(!resp.ok) throw new Error('dados_atuais.json indisponível (HTTP '+resp.status+')');
     dadosIniciais = await resp.json();
   } catch(e){
