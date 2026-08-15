@@ -46,6 +46,29 @@ function ehAnexoZip(a) {
     a.contentType === 'application/octet-stream' && /\.zip$/i.test(a.filename || '');
 }
 
+// O "Relatório Agendado" do MOVIAS não vem como anexo de verdade no e-mail — o
+// corpo (HTML) traz um botão "Download Zip" que aponta pra um link de download
+// no próprio servidor do MOVIAS (válido sem precisar estar logado, já que é
+// assim que quem recebe o e-mail consegue baixar o relatório). Por isso, além
+// de checar anexos MIME (.xlsx/.xls e .zip, para o caso de um dia mudarem o
+// formato do envio), procura também esse link no corpo do e-mail.
+function extrairLinkDownloadHtml(html) {
+  if (!html) return null;
+  const m = html.match(/https:\/\/www\.movias\.com\.br:8443\/api\/report\/download\?group=[0-9a-fA-F-]+/i);
+  return m ? m[0] : null;
+}
+
+async function baixarDeUrl(url) {
+  const resp = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TripoloniTelemetriaBot/1.0)' },
+  });
+  if (!resp.ok) {
+    throw new Error(`Falha ao baixar o relatório pelo link do MOVIAS (HTTP ${resp.status} ${resp.statusText}): ${url}`);
+  }
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  return buffer;
+}
+
 // O relatório "Agrupado" da MOVIAS vem como um .xlsx dentro de um .zip (em vez
 // do .xlsx direto). Extrai o primeiro .xlsx encontrado dentro do zip.
 function extrairXlsxDoZip(bufferZip, nomeZip) {
@@ -88,22 +111,25 @@ async function encontrarAnexosRelevantes(client) {
     candidatos.sort((a, b) => new Date(a.date) - new Date(b.date));
 
     const encontrados = [];
-    let semAnexoUtil = 0;
+    let semNadaUtil = 0;
     for (const cand of candidatos) {
       const { content } = await client.download(cand.uid, undefined, { uid: true });
       const parsed = await simpleParser(content);
       const anexoXlsx = (parsed.attachments || []).find(ehAnexoXlsx);
       const anexoZip = (parsed.attachments || []).find(ehAnexoZip);
+      const linkZip = extrairLinkDownloadHtml(parsed.html || parsed.textAsHtml || '');
       if (anexoXlsx) {
         encontrados.push({ ...cand, attachment: anexoXlsx, tipo: 'xlsx' });
       } else if (anexoZip) {
         encontrados.push({ ...cand, attachment: anexoZip, tipo: 'zip' });
+      } else if (linkZip) {
+        encontrados.push({ ...cand, downloadUrl: linkZip, tipo: 'link-zip' });
       } else {
-        semAnexoUtil++;
+        semNadaUtil++;
       }
     }
-    if (semAnexoUtil > 0) {
-      console.log(`${semAnexoUtil} e-mail(s) sem anexo .xlsx ou .zip utilizável (ignorados).`);
+    if (semNadaUtil > 0) {
+      console.log(`${semNadaUtil} e-mail(s) sem anexo .xlsx/.zip nem link de download do MOVIAS (ignorados).`);
     }
     return encontrados;
   } finally {
@@ -154,14 +180,30 @@ async function main() {
   // Processa cada e-mail encontrado (do mais antigo pro mais recente), extraindo
   // o .xlsx de dentro do .zip quando for o caso, e fundindo tudo na mesma base.
   for (const picked of encontrados) {
-    let bufferXlsx = picked.attachment.content;
-    let nomeUsado = picked.attachment.filename;
-    if (picked.tipo === 'zip') {
+    let bufferXlsx;
+    let nomeUsado;
+    if (picked.tipo === 'link-zip') {
+      const bufferZip = await baixarDeUrl(picked.downloadUrl);
+      if (bufferZip.length < 4 || bufferZip[0] !== 0x50 || bufferZip[1] !== 0x4b) {
+        // Não começa com "PK" (assinatura de .zip) — provavelmente voltou uma
+        // página de login/erro em vez do arquivo. Loga o começo do conteúdo pra
+        // facilitar o diagnóstico e pula este e-mail, sem derrubar a execução.
+        const inicio = bufferZip.slice(0, 200).toString('utf8').replace(/\s+/g, ' ').trim();
+        console.error(`Aviso: o link de download do e-mail "${picked.subject}" não retornou um .zip válido (${bufferZip.length} bytes). Início do conteúdo: "${inicio}". Pulando este e-mail.`);
+        continue;
+      }
+      const { nomeInterno, buffer } = extrairXlsxDoZip(bufferZip, 'relatório baixado do link do MOVIAS');
+      bufferXlsx = buffer;
+      nomeUsado = `link do MOVIAS → ${nomeInterno} (${bufferZip.length} bytes)`;
+    } else if (picked.tipo === 'zip') {
       const { nomeInterno, buffer } = extrairXlsxDoZip(picked.attachment.content, picked.attachment.filename);
       bufferXlsx = buffer;
       nomeUsado = `${picked.attachment.filename} → ${nomeInterno}`;
+    } else {
+      bufferXlsx = picked.attachment.content;
+      nomeUsado = `${picked.attachment.filename} (${picked.attachment.size} bytes)`;
     }
-    console.log(`Processando e-mail "${picked.subject}" de ${picked.from} (${picked.date}). Anexo: ${nomeUsado} (${picked.attachment.size} bytes).`);
+    console.log(`Processando e-mail "${picked.subject}" de ${picked.from} (${picked.date}). Anexo: ${nomeUsado}.`);
 
     const wb = XLSX.read(bufferXlsx, { type: 'buffer' });
     const { trips: tripsNovas, alertEvents: alertasNovos } = parseTelemetriaWorkbook(wb);
