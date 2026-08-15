@@ -223,6 +223,18 @@ async function main() {
   const tripsFundidas = [...tripsMap.values()].sort((a, b) => new Date(a.DataDescarga) - new Date(b.DataDescarga));
   const alertasFundidos = [...alertasMap.values()].sort((a, b) => new Date(a.DataEvento) - new Date(b.DataEvento));
 
+  // Nunca escreve/commita um resultado vazio. Isso pode acontecer quando todos
+  // os e-mails encontrados falharam ao ler (ex.: formato errado, ver aviso
+  // acima) e ainda não existe dados_atuais.json prévio pra herdar viagens — não
+  // publicar nada é sempre mais seguro do que publicar um arquivo com 0
+  // viagens (o painel trata a ausência do arquivo como "sem dados do robô
+  // ainda" e cai pro conteúdo local; um arquivo vazio, em vez de ausente, faz
+  // o painel achar que não há viagem nenhuma pra mostrar).
+  if (tripsFundidas.length === 0) {
+    console.log('Nenhuma viagem válida encontrada (nem nova, nem herdada de execuções anteriores) — não vou escrever dados_atuais.json vazio.');
+    return;
+  }
+
   const meta = buildMeta(tripsFundidas);
   const novoConteudo = { meta, trips: tripsFundidas, alertEvents: alertasFundidos };
   const anteriorComparavel = anterior ? { meta: anterior.meta, trips: anterior.trips, alertEvents: anterior.alertEvents } : null;
