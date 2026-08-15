@@ -205,10 +205,19 @@ async function main() {
     }
     console.log(`Processando e-mail "${picked.subject}" de ${picked.from} (${picked.date}). Anexo: ${nomeUsado}.`);
 
-    const wb = XLSX.read(bufferXlsx, { type: 'buffer' });
-    const { trips: tripsNovas, alertEvents: alertasNovos } = parseTelemetriaWorkbook(wb);
-    tripsNovas.forEach(t => tripsMap.set(tripKey(t), t));
-    alertasNovos.forEach(a => alertasMap.set(alertKey(a), a));
+    try {
+      const wb = XLSX.read(bufferXlsx, { type: 'buffer' });
+      const { trips: tripsNovas, alertEvents: alertasNovos } = parseTelemetriaWorkbook(wb);
+      tripsNovas.forEach(t => tripsMap.set(tripKey(t), t));
+      alertasNovos.forEach(a => alertasMap.set(alertKey(a), a));
+    } catch (err) {
+      // Não derruba a execução inteira por causa de UM e-mail com formato
+      // errado (ex.: o agendamento no MOVIAS às vezes manda o relatório de
+      // "Alertas" em vez do relatório de "Eventos" que este robô espera —
+      // problema de configuração do lado do MOVIAS, não deste código). Loga
+      // como aviso e segue processando os demais e-mails encontrados.
+      console.error(`Aviso: não consegui ler o anexo do e-mail "${picked.subject}" (${picked.date}) — pulando. Detalhe: ${err.message}`);
+    }
   }
 
   const tripsFundidas = [...tripsMap.values()].sort((a, b) => new Date(a.DataDescarga) - new Date(b.DataDescarga));
