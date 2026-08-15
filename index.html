@@ -568,7 +568,8 @@ table.heat-table td.cell.active-filter{ outline:2.5px solid var(--azul); outline
       <div style="flex:1 1 320px;">
         <h2 style="margin-bottom:6px;">Atualizar dados da telemetria</h2>
         <div class="note" style="margin-bottom:0;">Envie o relatório bruto exportado direto do site da MOVIAS (aba "Relatório de Eventos", sem nenhum tratamento manual) para recalcular esta aba com uma amostragem maior. Não mexe nas abas Escavadeiras/Caçambas. Depois de importar, use "Baixar dados atuais" para salvar um arquivo local — reabra com "Carregar dados salvos" a qualquer momento (mesmo em outra sessão) sem precisar reimportar a planilha da MOVIAS, e sem depender de internet.</div>
-        <div class="note" style="margin-bottom:0; margin-top:6px;">🔒 Os três botões ao lado pedem senha antes de agir (evita sobrescrever ou exportar os dados sem querer). É uma trava simples do lado do navegador — não impede alguém tecnicamente capaz de contornar pelo código-fonte, só evita clique acidental.</div>
+        <div class="note" style="margin-bottom:0; margin-top:6px;">🔒 Os botões ao lado pedem senha antes de agir (evita sobrescrever ou exportar os dados sem querer). É uma trava simples do lado do navegador — não impede alguém tecnicamente capaz de contornar pelo código-fonte, só evita clique acidental.</div>
+        <div class="note" style="margin-bottom:0; margin-top:6px;">🌐 "Publicar para todos" funde os dados que você importou aqui com os que já estão no site (não perde histórico) e publica direto no GitHub — some com a espera do robô, mas pede um token de acesso ao repositório na primeira vez.</div>
       </div>
       <div style="text-align:right;">
         <input type="file" id="fileInputTel" accept=".xlsx,.xls" style="display:none;">
@@ -585,7 +586,14 @@ table.heat-table td.cell.active-filter{ outline:2.5px solid var(--azul); outline
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
           Baixar dados atuais
         </button>
-        <div><button class="btn-pdf outline" id="btnTrocarSenhaTel" style="margin-top:8px;">Trocar senha (só nesta sessão)</button></div>
+        <button class="btn-update" id="btnPublicarTel" style="margin-left:6px;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/><path d="M5 19h14"/></svg>
+          Publicar para todos
+        </button>
+        <div>
+          <button class="btn-pdf outline" id="btnTrocarSenhaTel" style="margin-top:8px;">Trocar senha (só nesta sessão)</button>
+          <button class="btn-pdf outline" id="btnEsquecerTokenTel" style="margin-top:8px;">Esquecer token salvo</button>
+        </div>
         <div class="update-status" id="updateStatusTel"></div>
       </div>
     </div>
@@ -3458,9 +3466,23 @@ function rebuildDataset(parsed){
       throw new Error('Nenhuma viagem foi identificada (não há eventos "Sensor Descarregando" no arquivo). Confirme se o período exportado inclui caçambas com sensor de báscula ativo.');
     }
 
-    const tiposEquipamento = [...new Set(rows.map(r=>r.TipoVeiculo).filter(Boolean))].sort();
-    const frotaTipo = {};
-    rows.forEach(r=>{ if(r.TipoVeiculo) frotaTipo[r.Frota]=r.TipoVeiculo; });
+    // meta é calculado a partir só das viagens (trips) — reaproveitado também
+    // depois de uma fusão (merge) de dados, ver buildMetaTel() abaixo.
+    const rowsFrotaTipo = {};
+    rows.forEach(r=>{ if(r.TipoVeiculo) rowsFrotaTipo[r.Frota]=r.TipoVeiculo; });
+    const meta = buildMetaTel(trips, rowsFrotaTipo);
+    return {meta, trips, alertEvents};
+  }
+
+  // Recalcula o bloco "meta" a partir de uma lista de viagens (trips) — usado tanto
+  // ao ler uma planilha nova quanto ao publicar dados fundidos (merge) com o que já
+  // está no site. frotaTipoExtra é opcional: mapa Frota→TipoVeiculo vindo da leitura
+  // mais recente da planilha (cobre frotas que não têm viagem no período atual, mas
+  // apareceram nos eventos brutos) — quando ausente, é derivado só das trips.
+  function buildMetaTel(trips, frotaTipoExtra){
+    const frotaTipo = {...(frotaTipoExtra||{})};
+    trips.forEach(t=>{ if(t.TipoVeiculo && !frotaTipo[t.Frota]) frotaTipo[t.Frota]=t.TipoVeiculo; });
+    const tiposEquipamento = [...new Set(Object.values(frotaTipo).filter(Boolean))].sort();
     const equipPorTipo = {};
     Object.entries(frotaTipo).forEach(([f,t])=>{ (equipPorTipo[t]=equipPorTipo[t]||[]).push(f); });
     Object.keys(equipPorTipo).forEach(k=>{ equipPorTipo[k] = [...new Set(equipPorTipo[k])].sort(); });
@@ -3470,13 +3492,12 @@ function rebuildDataset(parsed){
     const cacambasMonitoradas = new Set(trips.map(t=>t.Frota)).size;
     const viagensDiaMedia = cacambasMonitoradas && diasPeriodo.length ? Math.round((trips.length/(cacambasMonitoradas*diasPeriodo.length))*10)/10 : 0;
 
-    const meta = {
+    return {
       periodo_min: diasPeriodo[0], periodo_max: diasPeriodo[diasPeriodo.length-1], dias_periodo: diasPeriodo.length,
       frota_total_cacambas: FLEET_TOTAL_CACAMBAS, pct_manual_identificado: PCT_MANUAL_IDENTIFICADO,
       cacambas_monitoradas_piloto: cacambasMonitoradas, viagens_dia_media_por_cacamba: viagensDiaMedia,
       tipos_equipamento: tiposEquipamento, equip_por_tipo: equipPorTipo, todas_frotas: todasFrotas, frota_tipo: frotaTipo,
     };
-    return {meta, trips, alertEvents};
   }
 
   // =====================================================================
@@ -3648,6 +3669,146 @@ function rebuildDataset(parsed){
       reader.readAsText(file);
     });
   }
+
+  // =====================================================================
+  // PUBLICAR PARA TODOS — publica direto no repositório do GitHub (mesmo
+  // arquivo dados_atuais.json que o robô automático mantém), sem depender do
+  // horário do robô nem de esperar o e-mail da MOVIAS. Funde (merge) com o
+  // que já está publicado antes de gravar, do mesmo jeito que o robô faz —
+  // então nunca apaga histórico, só soma o que for novo. Usa a API do GitHub
+  // diretamente do navegador com um token que o usuário fornece; o token só
+  // fica salvo (se autorizado) no localStorage deste navegador — nunca passa
+  // por nenhum servidor além do próprio GitHub.
+  // =====================================================================
+  const GH_REPO_API_TEL = 'https://api.github.com/repos/sergioabcfc/atualiza_telemetria/contents/dados_atuais.json';
+  const GH_TOKEN_KEY_TEL = 'ghPatTelemetriaTripoloni_v1';
+
+  function utf8ToBase64Tel(str){
+    const bytes = new TextEncoder().encode(str);
+    let binary = '';
+    bytes.forEach(b=>{ binary += String.fromCharCode(b); });
+    return btoa(binary);
+  }
+  function base64ToUtf8Tel(b64){
+    const binary = atob(b64.replace(/\n/g,''));
+    const bytes = new Uint8Array(binary.length);
+    for(let i=0;i<binary.length;i++) bytes[i] = binary.charCodeAt(i);
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+
+  function obterTokenTel(){
+    const salvo = localStorage.getItem(GH_TOKEN_KEY_TEL);
+    if(salvo) return Promise.resolve(salvo);
+    return new Promise(resolve=>{
+      const overlay = document.getElementById('tokenOverlay-tel');
+      const input = document.getElementById('tokenInput-tel');
+      const lembrar = document.getElementById('tokenLembrar-tel');
+      const erro = document.getElementById('tokenErro-tel');
+      const btnOk = document.getElementById('tokenConfirmar-tel');
+      const btnCancel = document.getElementById('tokenCancelar-tel');
+      input.value=''; erro.style.display='none'; lembrar.checked = true;
+      overlay.style.display = 'flex';
+      input.focus();
+      function confirmar(){
+        const val = input.value.trim();
+        if(!val){ erro.textContent = 'Cole o token antes de continuar.'; erro.style.display='block'; return; }
+        if(lembrar.checked) localStorage.setItem(GH_TOKEN_KEY_TEL, val);
+        limpar();
+        resolve(val);
+      }
+      function cancelar(){ limpar(); resolve(null); }
+      function onKey(e){ if(e.key==='Enter') confirmar(); else if(e.key==='Escape') cancelar(); }
+      function limpar(){
+        overlay.style.display = 'none';
+        btnOk.removeEventListener('click', confirmar);
+        btnCancel.removeEventListener('click', cancelar);
+        input.removeEventListener('keydown', onKey);
+      }
+      btnOk.addEventListener('click', confirmar);
+      btnCancel.addEventListener('click', cancelar);
+      input.addEventListener('keydown', onKey);
+    });
+  }
+
+  const btnPublicarTel = document.getElementById('btnPublicarTel');
+  if(btnPublicarTel){
+    btnPublicarTel.addEventListener('click', async ()=>{
+      if(!(await exigirSenhaTel('Publicar para todos'))) return;
+      if(!trips || !trips.length){
+        statusTel.textContent = 'Nada pra publicar ainda — importe um relatório da MOVIAS primeiro (botão "Atualizar dados (Telemetria)").';
+        statusTel.className = 'update-status err';
+        return;
+      }
+      const token = await obterTokenTel();
+      if(!token) return;
+
+      statusTel.textContent = 'Publicando… buscando os dados que já estão no site pra não perder histórico.';
+      statusTel.className = 'update-status';
+      try{
+        const headers = { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' };
+        let shaAtual = null, anterior = null;
+        const getResp = await fetch(GH_REPO_API_TEL, {headers});
+        if(getResp.status===200){
+          const info = await getResp.json();
+          shaAtual = info.sha;
+          try{ anterior = JSON.parse(base64ToUtf8Tel(info.content)); }catch(e){ anterior = null; }
+        } else if(getResp.status!==404){
+          const errBody = await getResp.json().catch(()=>({}));
+          throw new Error(`Não consegui ler o arquivo atual do GitHub (HTTP ${getResp.status}): ${errBody.message || 'token sem permissão ou expirado?'}`);
+        }
+
+        const tripsAnteriores = (anterior && Array.isArray(anterior.trips)) ? anterior.trips : [];
+        const alertasAnteriores = (anterior && Array.isArray(anterior.alertEvents)) ? anterior.alertEvents : [];
+        const tripKey = t => `${t.Frota}|${t.DataDescarga}`;
+        const alertKey = a => `${a.Frota}|${a.DataEvento}|${a.Evento}`;
+
+        const tripsMap = new Map(tripsAnteriores.map(t=>[tripKey(t), t]));
+        trips.forEach(t=>tripsMap.set(tripKey(t), t));
+        const tripsFundidas = [...tripsMap.values()].sort((a,b)=> new Date(a.DataDescarga) - new Date(b.DataDescarga));
+
+        const alertasMap = new Map(alertasAnteriores.map(a=>[alertKey(a), a]));
+        alertEvents.forEach(a=>alertasMap.set(alertKey(a), a));
+        const alertasFundidos = [...alertasMap.values()].sort((a,b)=> new Date(a.DataEvento) - new Date(b.DataEvento));
+
+        const metaFundida = buildMetaTel(tripsFundidas);
+        const payload = { meta: metaFundida, trips: tripsFundidas, alertEvents: alertasFundidos, exportadoEm: new Date().toISOString() };
+        const conteudoBase64 = utf8ToBase64Tel(JSON.stringify(payload));
+
+        const putBody = {
+          message: `Atualização manual via painel (${new Date().toLocaleString('pt-BR')})`,
+          content: conteudoBase64,
+        };
+        if(shaAtual) putBody.sha = shaAtual;
+
+        const putResp = await fetch(GH_REPO_API_TEL, {
+          method: 'PUT',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify(putBody),
+        });
+        if(putResp.status===200 || putResp.status===201){
+          const novas = tripsFundidas.length - tripsAnteriores.length;
+          statusTel.textContent = `Publicado para todos! ${fmt(tripsFundidas.length)} viagens no total (${novas>=0?'+'+novas:novas} nesta publicação). Pode levar 1-2 min pra refletir no link público.`;
+          statusTel.className = 'update-status ok';
+        } else {
+          const errBody = await putResp.json().catch(()=>({}));
+          throw new Error(`GitHub recusou a publicação (HTTP ${putResp.status}): ${errBody.message || 'erro desconhecido'}.`);
+        }
+      }catch(err){
+        statusTel.textContent = 'Erro ao publicar: ' + err.message;
+        statusTel.className = 'update-status err';
+      }
+    });
+  }
+
+  const btnEsquecerTokenTel = document.getElementById('btnEsquecerTokenTel');
+  if(btnEsquecerTokenTel){
+    btnEsquecerTokenTel.addEventListener('click', async ()=>{
+      if(!(await exigirSenhaTel('Esquecer token salvo'))) return;
+      localStorage.removeItem(GH_TOKEN_KEY_TEL);
+      statusTel.textContent = 'Token salvo removido deste navegador (a próxima publicação vai pedir de novo).';
+      statusTel.className = 'update-status ok';
+    });
+  }
 })();
 </script>
 
@@ -3674,6 +3835,23 @@ function rebuildDataset(parsed){
     <div class="senha-actions">
       <button class="btn-pdf outline" id="trocarSenhaCancelar-tel">Cancelar</button>
       <button class="btn-update" id="trocarSenhaConfirmar-tel">Salvar nova senha</button>
+    </div>
+  </div>
+</div>
+
+<div class="senha-overlay" id="tokenOverlay-tel" style="display:none;">
+  <div class="senha-box">
+    <h3>Publicar para todos</h3>
+    <p>Cole o token de acesso do GitHub (o mesmo tipo criado quando o repositório foi configurado — precisa de permissão de escrita de conteúdo só nesse repositório). Ele fica guardado apenas neste navegador, se você marcar a opção abaixo — nunca é enviado a mim nem a mais ninguém, só direto ao GitHub.</p>
+    <input type="password" id="tokenInput-tel" placeholder="github_pat_..." autocomplete="off">
+    <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:#555; margin-top:8px;">
+      <input type="checkbox" id="tokenLembrar-tel" checked style="width:auto;">
+      Lembrar neste navegador (não precisar colar de novo da próxima vez)
+    </label>
+    <div class="senha-erro" id="tokenErro-tel" style="display:none;"></div>
+    <div class="senha-actions">
+      <button class="btn-pdf outline" id="tokenCancelar-tel">Cancelar</button>
+      <button class="btn-update" id="tokenConfirmar-tel">Publicar</button>
     </div>
   </div>
 </div>
