@@ -19,6 +19,7 @@ import { simpleParser } from 'mailparser';
 import fs from 'fs';
 import path from 'path';
 import XLSX from 'xlsx';
+import AdmZip from 'adm-zip';
 import { parseTelemetriaWorkbook, buildMeta } from './parse_telemetria.mjs';
 
 const GMAIL_ADDRESS = process.env.GMAIL_ADDRESS;
@@ -33,7 +34,40 @@ if (!GMAIL_ADDRESS || !GMAIL_APP_PASSWORD) {
 
 const OUTPUT_PATH = path.resolve(process.cwd(), 'dados_atuais.json');
 
-async function encontrarAnexoMaisRecente(client) {
+function ehAnexoXlsx(a) {
+  return /\.xlsx?$/i.test(a.filename || '') ||
+    a.contentType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+}
+
+function ehAnexoZip(a) {
+  return /\.zip$/i.test(a.filename || '') ||
+    a.contentType === 'application/zip' ||
+    a.contentType === 'application/x-zip-compressed' ||
+    a.contentType === 'application/octet-stream' && /\.zip$/i.test(a.filename || '');
+}
+
+// O relatório "Agrupado" da MOVIAS vem como um .xlsx dentro de um .zip (em vez
+// do .xlsx direto). Extrai o primeiro .xlsx encontrado dentro do zip.
+function extrairXlsxDoZip(bufferZip, nomeZip) {
+  const zip = new AdmZip(bufferZip);
+  const entradas = zip.getEntries().filter(e => !e.isDirectory && /\.xlsx?$/i.test(e.entryName));
+  if (entradas.length === 0) {
+    throw new Error(`O anexo "${nomeZip}" é um .zip mas não contém nenhum .xlsx dentro.`);
+  }
+  // Se houver mais de um, usa o maior (mais provável de ser o relatório completo,
+  // não um resumo/capa).
+  entradas.sort((a, b) => b.header.size - a.header.size);
+  return { nomeInterno: entradas[0].entryName, buffer: entradas[0].getData() };
+}
+
+// Varre a caixa de entrada e retorna TODOS os e-mails (dentro da janela de
+// LOOKBACK_DAYS) que trazem um anexo utilizável (.xlsx/.xls direto, ou .zip
+// contendo um .xlsx), ordenados do mais antigo pro mais recente. É comum o
+// agendamento "Agrupado" do MOVIAS disparar mais de um e-mail por dia (ex.:
+// reenvio, ou geração em lotes) — processar todos e deixar a fusão por
+// Frota+horário decidir quem fica é mais seguro do que confiar só no mais
+// recente, já que a fusão é idempotente (reprocessar o mesmo evento não duplica).
+async function encontrarAnexosRelevantes(client) {
   const lock = await client.getMailboxLock('INBOX');
   try {
     const since = new Date();
@@ -42,7 +76,7 @@ async function encontrarAnexoMaisRecente(client) {
     const uids = await client.search({ since }, { uid: true });
     if (!uids || uids.length === 0) {
       console.log(`Nenhum e-mail encontrado nos últimos ${LOOKBACK_DAYS} dia(s).`);
-      return null;
+      return [];
     }
 
     const candidatos = [];
@@ -51,21 +85,27 @@ async function encontrarAnexoMaisRecente(client) {
       if (SENDER_FILTER && !fromAddr.includes(SENDER_FILTER)) continue;
       candidatos.push({ uid: msg.uid, date: msg.envelope?.date, subject: msg.envelope?.subject, from: fromAddr });
     }
-    candidatos.sort((a, b) => new Date(b.date) - new Date(a.date));
+    candidatos.sort((a, b) => new Date(a.date) - new Date(b.date));
 
+    const encontrados = [];
+    let semAnexoUtil = 0;
     for (const cand of candidatos) {
       const { content } = await client.download(cand.uid, undefined, { uid: true });
       const parsed = await simpleParser(content);
-      const anexoXlsx = (parsed.attachments || []).find(a =>
-        /\.xlsx?$/i.test(a.filename || '') ||
-        a.contentType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-      );
+      const anexoXlsx = (parsed.attachments || []).find(ehAnexoXlsx);
+      const anexoZip = (parsed.attachments || []).find(ehAnexoZip);
       if (anexoXlsx) {
-        return { ...cand, attachment: anexoXlsx };
+        encontrados.push({ ...cand, attachment: anexoXlsx, tipo: 'xlsx' });
+      } else if (anexoZip) {
+        encontrados.push({ ...cand, attachment: anexoZip, tipo: 'zip' });
+      } else {
+        semAnexoUtil++;
       }
     }
-    console.log(`Nenhum dos ${candidatos.length} e-mail(s) encontrados trazia um anexo .xlsx.`);
-    return null;
+    if (semAnexoUtil > 0) {
+      console.log(`${semAnexoUtil} e-mail(s) sem anexo .xlsx ou .zip utilizável (ignorados).`);
+    }
+    return encontrados;
   } finally {
     lock.release();
   }
@@ -83,22 +123,17 @@ async function main() {
   await client.connect();
   console.log(`Conectado a ${GMAIL_ADDRESS}.`);
 
-  let picked;
+  let encontrados;
   try {
-    picked = await encontrarAnexoMaisRecente(client);
+    encontrados = await encontrarAnexosRelevantes(client);
   } finally {
     await client.logout();
   }
 
-  if (!picked) {
+  if (!encontrados || encontrados.length === 0) {
     console.log('Nada a atualizar nesta execução.');
     return;
   }
-
-  console.log(`Usando e-mail "${picked.subject}" de ${picked.from} (${picked.date}). Anexo: ${picked.attachment.filename} (${picked.attachment.size} bytes).`);
-
-  const wb = XLSX.read(picked.attachment.content, { type: 'buffer' });
-  const { trips: tripsNovas, alertEvents: alertasNovos } = parseTelemetriaWorkbook(wb);
 
   // O relatório "Diário" da MOVIAS traz só uma janela móvel de ~48h (desde 0h de
   // ontem até 23h59 de hoje) — não o histórico completo do projeto. Por isso o
@@ -114,11 +149,27 @@ async function main() {
   const alertKey = a => `${a.Frota}|${a.DataEvento}|${a.Evento}`;
 
   const tripsMap = new Map(tripsAnteriores.map(t => [tripKey(t), t]));
-  tripsNovas.forEach(t => tripsMap.set(tripKey(t), t));
-  const tripsFundidas = [...tripsMap.values()].sort((a, b) => new Date(a.DataDescarga) - new Date(b.DataDescarga));
-
   const alertasMap = new Map(alertasAnteriores.map(a => [alertKey(a), a]));
-  alertasNovos.forEach(a => alertasMap.set(alertKey(a), a));
+
+  // Processa cada e-mail encontrado (do mais antigo pro mais recente), extraindo
+  // o .xlsx de dentro do .zip quando for o caso, e fundindo tudo na mesma base.
+  for (const picked of encontrados) {
+    let bufferXlsx = picked.attachment.content;
+    let nomeUsado = picked.attachment.filename;
+    if (picked.tipo === 'zip') {
+      const { nomeInterno, buffer } = extrairXlsxDoZip(picked.attachment.content, picked.attachment.filename);
+      bufferXlsx = buffer;
+      nomeUsado = `${picked.attachment.filename} → ${nomeInterno}`;
+    }
+    console.log(`Processando e-mail "${picked.subject}" de ${picked.from} (${picked.date}). Anexo: ${nomeUsado} (${picked.attachment.size} bytes).`);
+
+    const wb = XLSX.read(bufferXlsx, { type: 'buffer' });
+    const { trips: tripsNovas, alertEvents: alertasNovos } = parseTelemetriaWorkbook(wb);
+    tripsNovas.forEach(t => tripsMap.set(tripKey(t), t));
+    alertasNovos.forEach(a => alertasMap.set(alertKey(a), a));
+  }
+
+  const tripsFundidas = [...tripsMap.values()].sort((a, b) => new Date(a.DataDescarga) - new Date(b.DataDescarga));
   const alertasFundidos = [...alertasMap.values()].sort((a, b) => new Date(a.DataEvento) - new Date(b.DataEvento));
 
   const meta = buildMeta(tripsFundidas);
