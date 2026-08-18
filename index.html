@@ -1728,6 +1728,14 @@ function rebuildDataset(parsed){
 <script>
 (async function(){
   let meta, trips, alertEvents, diasDisponiveis;
+  // Quantas viagens já estavam publicadas no GitHub quando esta aba carregou —
+  // capturado uma única vez, logo após o primeiro loadData(dadosIniciais).
+  // Serve de piso de segurança no "Publicar para todos": o "anterior" buscado
+  // do GitHub na hora de publicar nunca pode vir menor que isso (só cresce com
+  // o tempo); se vier, é sinal de que a leitura do arquivo publicado falhou
+  // silenciosamente (do jeito que já aconteceu antes) — e é melhor travar a
+  // publicação do que arriscar sobrescrever histórico de novo.
+  let publicadoConhecidoTripsCount = 0;
 
   function dLabel(iso){ const [y,m,d]=iso.split('-'); return d+'/'+m; }
 
@@ -2041,6 +2049,7 @@ function rebuildDataset(parsed){
     dadosIniciais = JSON.parse(document.getElementById('data-json-tel').textContent);
   }
   loadData(dadosIniciais);
+  publicadoConhecidoTripsCount = Array.isArray(dadosIniciais.trips) ? dadosIniciais.trips.length : 0;
 
   // =====================================================================
   // STATE + FILTERS
@@ -3785,6 +3794,15 @@ function rebuildDataset(parsed){
 
         const tripsAnteriores = (anterior && Array.isArray(anterior.trips)) ? anterior.trips : [];
         const alertasAnteriores = (anterior && Array.isArray(anterior.alertEvents)) ? anterior.alertEvents : [];
+
+        // Piso de segurança: o que acabamos de ler do GitHub como "anterior" nunca
+        // pode ter menos viagens do que já sabíamos estar publicado quando esta aba
+        // carregou (histórico só cresce). Se vier menor, a leitura falhou silenciosamente
+        // (foi exatamente assim que o histórico se perdeu antes) — trava a publicação
+        // em vez de arriscar sobrescrever de novo.
+        if(tripsAnteriores.length < publicadoConhecidoTripsCount){
+          throw new Error(`Piso de segurança acionado: o site tinha ${fmt(publicadoConhecidoTripsCount)} viagens publicadas quando esta página carregou, mas só consegui ler ${fmt(tripsAnteriores.length)} agora ao buscar o histórico atual no GitHub para mesclar — isso indica que a leitura falhou, não que o histórico realmente encolheu. Publicação cancelada por segurança, nada foi sobrescrito. Recarregue a página (Ctrl+Shift+R) e tente de novo; se persistir, avise o Claude.`);
+        }
         const tripKey = t => `${t.Frota}|${t.DataDescarga}`;
         const alertKey = a => `${a.Frota}|${a.DataEvento}|${a.Evento}`;
 
